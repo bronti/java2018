@@ -2,7 +2,6 @@ package ru.au.yaveyn.brontigit;
 
 
 import ru.au.yaveyn.brontigit.exception.GitException;
-import ru.au.yaveyn.brontigit.exception.InvalidGitDataException;
 import ru.au.yaveyn.brontigit.exception.InvalidGitDirException;
 import ru.au.yaveyn.brontigit.exception.InvalidUsageException;
 
@@ -58,64 +57,78 @@ public class BrontiCLI {
             }
 
             switch (args[0]) {
-                case "add" : {
+                case "add": {
                     checkAtLeastXArgs(args, 2);
                     List<String> fileNames = Arrays.asList(args).subList(1, args.length);
                     git.add(fileNamesToPaths(fileNames));
                     break;
                 }
-                case "rm" : {
+                case "rm": {
                     checkAtLeastXArgs(args, 2);
                     List<String> fileNames = Arrays.asList(args).subList(1, args.length);
                     git.remove(fileNamesToPaths(fileNames));
                     break;
                 }
-                case "status" : {
+                case "status": {
                     checkXArgsSharp(args, 1);
-                    // todo:
+                    List<Path> added = git.getAdded();
+                    List<Path> removed = git.getRemoved();
+                    List<Path> rest = git.getUntracked();
+                    System.out.println("Added files:\n");
+                    String addedStr = added.stream().map(Path::toString).collect(Collectors.joining("\n"));
+                    System.out.println(addedStr);
+                    System.out.println("\nRemoved files:\n");
+                    String removedStr = removed.stream().map(Path::toString).collect(Collectors.joining("\n"));
+                    System.out.println(removedStr);
+                    System.out.println("\nUntracked files:\n");
+                    String restStr = rest.stream().map(Path::toString).collect(Collectors.joining("\n"));
+                    System.out.println(restStr);
                     break;
                 }
-                case "commit" : {
+                case "commit": {
                     checkXArgsSharp(args, 2);
                     String commitMsg = args[1];
                     git.commit(commitMsg);
                     break;
                 }
-                case "reset" : {
+                case "reset": {
                     checkXArgsSharp(args, 2);
                     String commitName = args[1];
                     git.reset(commitName);
                     break;
                 }
-                case "log" : {
+                case "log": {
                     checkAtLeastXArgs(args, 1);
                     checkNoMoreThanXArgs(args, 2);
                     String commitName = null;
                     if (args.length == 2) {
                         commitName = args[1];
                     }
-                    // todo:
+                    List<Commit> log = git.log(commitName);
+                    String msg = log.stream().map(c -> c.getName() + " " + c.getMsg()).collect(Collectors.joining("\n"));
+                    System.out.println(msg);
                     break;
                 }
-                case "checkout" : {
+                case "checkout": {
                     checkAtLeastXArgs(args, 2);
                     if (args[1].equals("--")) {
                         checkAtLeastXArgs(args, 3);
                         List<String> fileNames = Arrays.asList(args).subList(2, args.length);
-//                        data.checkoutFiles(fileNamesToPaths(fileNames));
+                        git.checkoutFiles(fileNamesToPaths(fileNames));
                     } else {
                         checkXArgsSharp(args, 2);
                         String commitName = args[1];
-//                        data.checkoutRevision(commitName);
+                        git.checkoutRevision(commitName);
                     }
                     break;
                 }
-                default: throw new InvalidUsageException();
+                default:
+                    throw new InvalidUsageException();
             }
         } catch (IOException e) {
             System.out.println("IOException occured, bronti git folder may be corrupted.");
             e.printStackTrace();
-        } catch (InvalidGitDataException | InvalidGitDirException | GitException e) {
+        } catch (InvalidGitDirException | GitException e) {
             System.out.println("Error: " + e.getMessage());
             e.printStackTrace();
         } catch (InvalidUsageException e) {

@@ -1,8 +1,12 @@
 package ru.au.yaveyn.brontigit;
 
+import com.google.gson.*;
+
+import java.lang.reflect.Type;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class Commit {
     private String name;
@@ -23,6 +27,18 @@ public class Commit {
         return prevCommit;
     }
 
+    public Set<Path> getTracked() {
+        return files.keySet();
+    }
+
+    Commit getLastCommit(Path file) {
+        return files.get(file);
+    }
+
+    public boolean isEmpty() {
+        return changedFiles.isEmpty();
+    }
+
     private Commit(String name, Commit prevCommit, String msg, Map<Path, Commit> files, Set<Path> changedFiles) {
         this.name = name;
         this.prevCommit = prevCommit;
@@ -31,15 +47,15 @@ public class Commit {
         this.changedFiles = changedFiles;
     }
 
-    public Commit() {
+    Commit() {
         this(null, null, null, new HashMap<>(), new HashSet<>());
     }
 
-    public Commit createNext() {
+    Commit createNext() {
         return new Commit(null, this, null, files, new HashSet<>());
     }
 
-    public void commit(String name, String msg) {
+    void commit(String name, String msg) {
         this.name = name;
         this.msg = msg;
     }
@@ -52,93 +68,103 @@ public class Commit {
         return changedFiles.contains(file);
     }
 
-    public void add(Path file) {
+    public List<Path> getAdded() {
+        return changedFiles.stream().filter(this::contains).collect(Collectors.toList());
+    }
+
+    public List<Path> getRemoved() {
+        return changedFiles.stream().filter(f -> !this.contains(f)).collect(Collectors.toList());
+    }
+
+    void add(Path file) {
         files.put(file, this);
         changedFiles.add(file);
     }
 
-    public boolean remove(Path file) {
+    boolean remove(Path file) {
+        assert this.contains(file);
         files.remove(file);
-        if (changedFiles.contains(file)) {
-            return true;
-        } else {
+        if (!changedFiles.contains(file)) {
             changedFiles.add(file);
             return false;
         }
+        if (prevCommit == null || !prevCommit.contains(file)) {
+            changedFiles.remove(file);
+            // todo: fix this, so prevCommit doesnt have to be stored
+        }
+        return true;
     }
 
-    public Commit reset(Path file) {
-        files.remove(file);
-        if (prevCommit.contains(file)) {
-            files.put(file, prevCommit.files.get(file));
+    public static class Serializer implements JsonSerializer<Commit> {
+
+        public JsonElement serialize(Commit src, Type typeOfSrc, JsonSerializationContext context) {
+            JsonObject result = new JsonObject();
+            result.addProperty("name", src.name);
+            result.addProperty("prev", src.prevCommit == null ? null : src.prevCommit.getName());
+            result.addProperty("msg", src.msg);
+
+            JsonArray changed = new JsonArray();
+            src.changedFiles.forEach(f -> changed.add(context.serialize(f, Path.class)));
+            result.add("changed", changed);
+
+            JsonArray allFiles = new JsonArray();
+            src.files.forEach((k, v) -> {
+                        JsonArray entry = new JsonArray();
+                        entry.add(context.serialize(k, Path.class));
+                        entry.add((v == src ? "" : v.getName()));
+                        allFiles.add(entry);
+                    });
+
+            result.add("files", allFiles);
+            return result;
         }
-        changedFiles.remove(file);
-        return files.get(file);
     }
 
-    public boolean isEmpty() {
-        return changedFiles.isEmpty();
-    }
+    public static class Deserializer implements JsonDeserializer<Commit> {
+        Map<String, Commit> allCommits;
 
-    static class Serializable {
-        private String name;
-        private final String prevCommit;
-        private String msg;
-        private Map<Path, String> files;
-        private Set<Path> changedFiles;
-
-        public String getName() {
-            return name;
+        // get this class instance only through BrontiGitData.Deserializer
+        Deserializer() {
         }
 
-        private Serializable(String name, String prevCommit, String msg, Map<Path, String> files, Set<Path> changedFiles) {
-            this.name = name;
-            this.prevCommit = prevCommit;
-            this.msg = msg;
-            this.files = files;
-            this.changedFiles = changedFiles;
+        void renewCommitsMap(Map<String, Commit> allCommits) {
+            this.allCommits = allCommits;
         }
 
-        public static Serializable fromCommit(Commit commit) {
-            Map<Path, String> serializableFiles = commit
-                    .files
-                    .entrySet()
-                    .stream()
-                    .collect(Collectors.toMap(Map.Entry::getKey, e -> {
-                        String name = e.getValue().getName();
-                        return name == null ? "" : name;
-                    }));
+        @Override
+        public Commit deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) throws JsonParseException {
+            JsonObject src = json.getAsJsonObject();
 
-            return new Serializable(
-                    commit.getName(),
-                    commit.prevCommit == null ? null : commit.prevCommit.getName(),
-                    commit.msg,
-                    serializableFiles,
-                    commit.changedFiles
-            );
-        }
+            String name = src.get("name") == null ? null : src.get("name").getAsString();
 
-        public static Commit toCommit(Serializable commit, Map<String, Commit> allCommits) {
-            Commit result = new Commit(
-                    commit.name,
-                    commit.prevCommit == null ? null : allCommits.get(commit.prevCommit),
-                    commit.msg,
-                    null,
-                    commit.changedFiles
-            );
+            JsonElement prevSrc = src.get("prev");
+            Commit prevCommit = prevSrc == null ? null : allCommits.get(prevSrc.getAsString());
 
-            result.files = commit
-                    .files
-                    .entrySet()
-                    .stream()
-                    .collect(Collectors.toMap(Map.Entry::getKey, e -> {
-                        String name = e.getValue();
-                        if (name.equals("") || !allCommits.containsKey(name)) {
-                            return result;
-                        } else {
-                            return allCommits.get(name);
-                        }
-                    }));
+            String msg = src.get("msg") == null ? null : src.get("msg").getAsString();
+
+            Commit result = new Commit(name, prevCommit, msg, null, null);
+            if (name != null) {
+                allCommits.put(name, result);
+            }
+
+            Map<Path, Commit> files = new HashMap<>();
+            JsonArray filesSrc = src.get("files").getAsJsonArray();
+            for (JsonElement fileEl : filesSrc) {
+                JsonArray fileSrc = fileEl.getAsJsonArray();
+                Path file = context.deserialize(fileSrc.get(0), Path.class);
+                String commitName = fileSrc.get(1).getAsString();
+                Commit commit = commitName.equals("") ? result : allCommits.get(commitName);
+                files.put(file, commit);
+            }
+            result.files = files;
+
+            Set<Path> changedFiles = new HashSet<>();
+            JsonArray changedSrc = src.get("changed").getAsJsonArray();
+            for (JsonElement changedEl : changedSrc) {
+                changedFiles.add(context.deserialize(changedEl, Path.class));
+            }
+            result.changedFiles = changedFiles;
+            result.files = files;
 
             return result;
         }

@@ -6,20 +6,19 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import ru.au.yaveyn.brontigit.exception.GitException;
-import ru.au.yaveyn.brontigit.exception.InvalidGitDataException;
 import ru.au.yaveyn.brontigit.exception.InvalidGitDirException;
 
-import javax.swing.*;
-
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import java.io.FileWriter;
 import java.io.IOException;
+import java.io.Writer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
-import java.util.stream.Collectors;
 
 public class GitTest {
 
@@ -30,8 +29,7 @@ public class GitTest {
     private Path gitFolder;
     private Path commitsFolder;
     private Path headFolder;
-    private Path pendingFile;
-    private Path commitsFile;
+    private Path dataFile;
 
 
     @Before
@@ -40,8 +38,7 @@ public class GitTest {
         gitFolder = root.resolve(".brontiGit");
         commitsFolder = gitFolder.resolve("commits");
         headFolder = commitsFolder.resolve("head");
-        pendingFile = gitFolder.resolve("pending.json");
-        commitsFile = gitFolder.resolve("commits.json");
+        dataFile = gitFolder.resolve(BrontiGitData.Generator.FILE_NAME);
     }
 
     static private void assertFolder(Path folder) {
@@ -56,8 +53,11 @@ public class GitTest {
         assertFolder(gitFolder);
         assertFolder(commitsFolder);
         assertFolder(headFolder);
-        assertFile(pendingFile);
-        assertFile(commitsFile);
+        assertFile(dataFile);
+    }
+
+    private BrontiGitData getData() throws IOException {
+        return new BrontiGitData.Generator(gitFolder).deserialize();
     }
 
     @Test
@@ -65,8 +65,8 @@ public class GitTest {
         BrontiGit git = new BrontiGit(root);
         git.init();
         assertCorrectGitFolder();
-        BrontiGitData.Serializer s = new BrontiGitData.Serializer(gitFolder);
-        BrontiGitData data = s.deserialize();
+
+        BrontiGitData data = getData();
         assertTrue(data.getCommits().isEmpty());
         assertTrue(data.getPending().isEmpty());
     }
@@ -81,8 +81,7 @@ public class GitTest {
 
         assertFile(headFolder.resolve("toAdd.txt"));
 
-        BrontiGitData.Serializer s = new BrontiGitData.Serializer(gitFolder);
-        BrontiGitData data = s.deserialize();
+        BrontiGitData data = getData();
         assertTrue(data.getCommits().isEmpty());
         assertFalse(data.getPending().isEmpty());
         assertTrue(data.getPending().contains(toAdd));
@@ -102,8 +101,7 @@ public class GitTest {
         assertFile(headFolder.resolve("toAdd1.txt"));
         assertFile(headFolder.resolve("toAdd2.txt"));
 
-        BrontiGitData.Serializer s = new BrontiGitData.Serializer(gitFolder);
-        BrontiGitData data = s.deserialize();
+        BrontiGitData data = getData();
         assertTrue(data.getCommits().isEmpty());
         assertFalse(data.getPending().isEmpty());
         assertTrue(data.getPending().contains(toAdd1));
@@ -123,8 +121,7 @@ public class GitTest {
 
         assertFile(headFolder.resolve("dir").resolve("toAdd.txt"));
 
-        BrontiGitData.Serializer s = new BrontiGitData.Serializer(gitFolder);
-        BrontiGitData data = s.deserialize();
+        BrontiGitData data = getData();
         assertTrue(data.getCommits().isEmpty());
         assertFalse(data.getPending().isEmpty());
         assertTrue(data.getPending().contains(toAdd));
@@ -132,7 +129,7 @@ public class GitTest {
     }
 
     @Test
-    public void testCommit() throws IOException, GitException, InvalidGitDirException, InvalidGitDataException {
+    public void testCommit() throws IOException, GitException, InvalidGitDirException {
         BrontiGit git = new BrontiGit(root);
         git.init();
         assertCorrectGitFolder();
@@ -140,8 +137,7 @@ public class GitTest {
         git.add(Collections.singletonList(toAdd));
         git.commit("msg");
 
-        BrontiGitData.Serializer s = new BrontiGitData.Serializer(gitFolder);
-        BrontiGitData data = s.deserialize();
+        BrontiGitData data = getData();
         assertTrue(data.getPending().isEmpty());
         Assert.assertEquals(1, data.getCommits().size());
 
@@ -153,7 +149,7 @@ public class GitTest {
     }
 
     @Test
-    public void testCommits() throws IOException, GitException, InvalidGitDirException, InvalidGitDataException {
+    public void testCommits() throws IOException, GitException, InvalidGitDirException {
         BrontiGit git = new BrontiGit(root);
         git.init();
         assertCorrectGitFolder();
@@ -167,8 +163,7 @@ public class GitTest {
         git.add(Collections.singletonList(toAdd3));
         git.commit("3");
 
-        BrontiGitData.Serializer s = new BrontiGitData.Serializer(gitFolder);
-        BrontiGitData data = s.deserialize();
+        BrontiGitData data = getData();
         assertTrue(data.getPending().isEmpty());
         Assert.assertEquals(3, data.getCommits().size());
 
@@ -177,5 +172,135 @@ public class GitTest {
             assertFolder(commitFolder);
             assertFile(commitFolder.resolve("toAdd" + commit.getMsg()));
         }
+    }
+
+    @Test
+    public void testRemoveAlreadyCommitted() throws IOException, GitException, InvalidGitDirException {
+        BrontiGit git = new BrontiGit(root);
+        git.init();
+        assertCorrectGitFolder();
+        Path toAdd = Files.createFile(root.resolve("toAdd"));
+        git.add(Collections.singletonList(toAdd));
+        git.commit("0");
+
+        try (Writer writer = new FileWriter(toAdd.toString())) {
+            writer.write("change");
+        }
+
+        git.add(Collections.singletonList(toAdd));
+        git.remove(Collections.singletonList(toAdd));
+
+        assertFalse(Files.exists(headFolder.resolve("toAdd")));
+        assertFile(toAdd);
+
+        BrontiGitData data = getData();
+        assertFalse(data.getPending().isEmpty());
+    }
+
+    @Test
+    public void testRemoveJustAdded() throws IOException, GitException, InvalidGitDirException {
+        BrontiGit git = new BrontiGit(root);
+        git.init();
+        assertCorrectGitFolder();
+        Path toAdd = Files.createFile(root.resolve("toAdd.txt"));
+        git.add(Collections.singletonList(toAdd));
+        git.remove(Collections.singletonList(toAdd));
+
+        assertFalse(Files.exists(headFolder.resolve("toAdd.txt")));
+        assertFile(toAdd);
+
+        BrontiGitData data = getData();
+        assertTrue(data.getPending().isEmpty());
+    }
+
+    @Test
+    public void testReset() throws IOException, GitException, InvalidGitDirException {
+        BrontiGit git = new BrontiGit(root);
+        git.init();
+        assertCorrectGitFolder();
+        Path toAdd1 = Files.createFile(root.resolve("toAdd1"));
+        Path toAdd2 = Files.createFile(root.resolve("toAdd2"));
+        Path toAdd3 = Files.createFile(root.resolve("toAdd3"));
+
+        git.add(Collections.singletonList(toAdd1));
+        Commit toReset = git.commit("1");
+        git.add(Collections.singletonList(toAdd2));
+        git.commit("2");
+        git.add(Collections.singletonList(toAdd3));
+        git.commit("3");
+
+        git.reset(toReset.getName());
+
+        BrontiGitData data = getData();
+        assertTrue(data.getPending().isEmpty());
+        Assert.assertEquals(1, data.getCommits().size());
+
+        for (Commit commit : data.getCommits().values()) {
+            Path commitFolder = commitsFolder.resolve(commit.getName());
+            Path commitFile = commitFolder.resolve("toAdd" + commit.getMsg());
+            if (commit == toReset) {
+                assertFalse(Files.exists(commitFolder));
+            } else {
+                assertFolder(commitFolder);
+                assertFile(commitFile);
+            }
+        }
+    }
+
+    @Test
+    public void testCheckoutFiles() throws IOException, GitException, InvalidGitDirException {
+        BrontiGit git = new BrontiGit(root);
+        git.init();
+        assertCorrectGitFolder();
+        Path toAdd = Files.createFile(root.resolve("toAdd"));
+
+        git.add(Collections.singletonList(toAdd));
+        git.commit("1");
+
+        try (Writer writer = new FileWriter(toAdd.toString())) {
+            writer.write("change\n");
+        }
+
+        git.add(Collections.singletonList(toAdd));
+        git.commit("2");
+
+        try (Writer writer = new FileWriter(toAdd.toString())) {
+            writer.write("ololo\nsecond change\n");
+        }
+
+        git.checkoutFiles(Collections.singletonList(toAdd));
+
+        assertEquals(1, Files.readAllLines(toAdd).size());
+    }
+
+    @Test
+    public void testCheckoutRevision() throws IOException, GitException, InvalidGitDirException {
+        BrontiGit git = new BrontiGit(root);
+        git.init();
+        assertCorrectGitFolder();
+        Path toAdd = Files.createFile(root.resolve("toAdd"));
+        Path toAdd2 = Files.createFile(root.resolve("toAdd2"));
+
+
+        try (Writer writer = new FileWriter(toAdd.toString())) {
+            writer.write("change\n");
+        }
+
+        git.add(Collections.singletonList(toAdd));
+        git.commit("0");
+
+        git.add(Collections.singletonList(toAdd2));
+        Commit toCheckout = git.commit("1");
+
+        try (Writer writer = new FileWriter(toAdd.toString())) {
+            writer.write("ololo\nsecond change\n");
+        }
+
+        git.add(Collections.singletonList(toAdd));
+        git.commit("2");
+
+        git.checkoutRevision(toCheckout.getName());
+
+        assertEquals(1, Files.readAllLines(toAdd).size());
     }
 }

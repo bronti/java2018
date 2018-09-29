@@ -1,10 +1,7 @@
 package ru.au.yaveyn.brontigit;
 
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.reflect.TypeToken;
+import com.google.gson.*;
 import ru.au.yaveyn.brontigit.exception.GitException;
-import ru.au.yaveyn.brontigit.exception.InvalidGitDataException;
 
 import java.io.*;
 import java.lang.reflect.Type;
@@ -13,153 +10,256 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
-public class BrontiGitData {
+class BrontiGitData implements AutoCloseable {
     private static final DateTimeFormatter DTF = DateTimeFormatter.ofPattern("yyyy.MM.dd_HH:mm:ss:SSS");
+
+    private Generator toCloseWith;
 
     private Map<String, Commit> commits;
     private Commit pending;
+    private String currentCommitName;
 
-    private BrontiGitData(Map<String, Commit> commits, Commit pending) {
+    private BrontiGitData(Generator toCloseWith, Map<String, Commit> commits, Commit pending, String currentCommitName) {
+        this.toCloseWith = toCloseWith;
         this.commits = commits;
         this.pending = pending;
+        this.currentCommitName = currentCommitName;
     }
 
-    private BrontiGitData() {
-        this(new HashMap<>(), new Commit());
+    private BrontiGitData(Generator toCloseWith) {
+        this(toCloseWith, new HashMap<>(), new Commit(), null);
     }
 
-    private void checkCommitExistence(String commitName) throws InvalidGitDataException {
+    private boolean isDetached() {
+        return pending.getPrevCommit() != null && !pending.getPrevCommit().getName().equals(currentCommitName);
+    }
+
+    private void checkCommitExists(String commitName) throws GitException {
         if (!commits.keySet().contains(commitName)) {
-            throw new InvalidGitDataException("There is no such commit.");
+            throw new GitException("There is no such commit.");
         }
     }
 
-    private void checkFileTracked(Path file) throws InvalidGitDataException {
+    private void checkNotDetachedState() throws GitException {
+        if (isDetached()) {
+            throw new GitException("Your HEAD is detached :( Try resetting to current commit or checkouting last commit.");
+        }
+    }
+
+    private void checkFileTracked(Path file) throws GitException {
+        checkNotDetachedState();
         if (!pending.contains(file)) {
-            throw new InvalidGitDataException("File " + file + " is not tracked.");
+            throw new GitException("File " + file + " is not tracked.");
         }
     }
 
-    private void checkFileChanged(Path file) throws InvalidGitDataException {
-        if (!pending.isChanged(file)) {
-            throw new InvalidGitDataException("File " + file + " is not changed.");
+    private void checkNoPendingChanges() throws GitException {
+        if (!isDetached() && !pending.isEmpty()) {
+            throw new GitException("There are some uncommitted changes.");
         }
     }
 
-    private void renewPending() {
-        if (pending.getPrevCommit() == null) {
-            pending = new Commit();
-        } else {
-            pending = pending.getPrevCommit().createNext();
-        }
+    private void shiftCurrentCommitTo(String commitName) {
+        currentCommitName = commitName;
+        pending = commits.get(commitName).createNext();
     }
 
-    public void add(List<Path> files) {
+    void add(List<Path> files) throws GitException {
+        checkNotDetachedState();
         files.forEach(pending::add);
     }
 
-    public List<Path> remove(List<Path> files) throws InvalidGitDataException {
+    List<Path> remove(List<Path> files) throws GitException {
+        checkNotDetachedState();
         for (Path file : files) {
             checkFileTracked(file);
         }
         return files.stream().filter(pending::remove).collect(Collectors.toList());
     }
 
-    public Commit commit(String msg) throws InvalidGitDataException {
+    Commit commit(String msg) throws GitException {
+        checkNotDetachedState();
         if (pending.isEmpty()) {
-            throw new InvalidGitDataException("Commit is empty.");
+            throw new GitException("Commit is empty.");
         }
         ZonedDateTime now = ZonedDateTime.now(ZoneId.of("GMT"));
         String commitName = DTF.format(now);
         commits.put(commitName, pending);
         pending.commit(commitName, msg);
-        renewPending();
+
+        shiftCurrentCommitTo(pending.getName());
+
         return commits.get(commitName);
     }
 
-    public List<Commit> reset(String commitName) throws InvalidGitDataException, GitException {
-        checkCommitExistence(commitName);
-        if (!pending.isEmpty()) {
-            throw new GitException("Cannot reset. There are uncommited files.");
-        }
+    List<Commit> reset(String commitName) throws GitException {
+        checkCommitExists(commitName);
+        checkNoPendingChanges();
         List<Commit> commitsToRemove = commits
                 .values()
                 .stream()
                 .filter(entry -> entry.getName().compareTo(commitName) > 0)
                 .collect(Collectors.toList());
         commits.entrySet().removeIf(entry -> entry.getKey().compareTo(commitName) > 0);
-        pending = commits.get(commitName).createNext();
+
+        shiftCurrentCommitTo(commitName);
+
         return commitsToRemove;
     }
 
-    public void checkoutRevision(String commitName) throws InvalidGitDataException {
-        checkCommitExistence(commitName);
-        // todo: detached head
+    Map<Path, Commit> checkoutRevision(String commitName) throws GitException {
+        checkCommitExists(commitName);
+        checkNoPendingChanges();
+
+        Commit toCheckout = commits.get(commitName);
+        Set<Path> affectedFiles = new HashSet<>(pending.getTracked());
+        affectedFiles.addAll(toCheckout.getTracked());
+
+        currentCommitName = commitName;
+
+        return affectedFiles.stream().collect(Collectors.toMap(Function.identity(), toCheckout::getLastCommit));
     }
 
-    public void checkoutFiles(List<Path> files) throws InvalidGitDataException {
+    Map<Path, Commit> checkoutFiles(List<Path> files) throws GitException {
+        checkNotDetachedState();
         for (Path file : files) {
-            checkFileChanged(file);
+            if (pending.isChanged(file)) {
+                throw new GitException("There is an uncommitted version of file " + file + ".");
+            }
+            if (!pending.contains(file)) {
+                throw new GitException("There is no previous version of file " + file + ".");
+            }
         }
-        files.forEach(pending::reset);
+        return files.stream().collect(Collectors.toMap(Function.identity(), pending::getLastCommit));
     }
 
-    public static class Serializer {
+    public List<Commit> getCommitsFrom(String commitName) throws GitException {
+        if (commitName != null) {
+            checkCommitExists(commitName);
+            if (commitName.compareTo(currentCommitName) > 0) {
+                throw new GitException("Commit " + commitName + " happens in the future Oo");
+            }
+        }
+        List<Commit> result = new ArrayList<>();
+        Commit current = commits.get(currentCommitName);
+        while (current != null && !current.getName().equals(commitName)) {
+            result.add(current);
+            current = current.getPrevCommit();
+        }
+        return result;
+    }
+
+    public List<Path> getAdded() throws GitException {
+        checkNotDetachedState();
+        return pending.getAdded();
+    }
+
+    public List<Path> getRemoved() throws GitException {
+        checkNotDetachedState();
+        return pending.getRemoved();
+    }
+
+    private static class Serializer implements JsonSerializer<BrontiGitData> {
+        @Override
+        public JsonElement serialize(BrontiGitData src, Type typeOfSrc, JsonSerializationContext context) {
+            JsonObject result = new JsonObject();
+            result.addProperty("current", src.currentCommitName);
+
+            JsonArray commits = new JsonArray();
+            src.commits
+                    .entrySet()
+                    .stream()
+                    .sorted(Comparator.comparing(Map.Entry::getKey))
+                    .forEach(e -> commits.add(context.serialize(e.getValue())));
+            result.add("commits", commits);
+
+            result.add("pending", context.serialize(src.pending));
+            return result;
+        }
+    }
+
+    private static class Deserializer implements JsonDeserializer<BrontiGitData> {
+
+        private Commit.Deserializer commitDeserializer = new Commit.Deserializer();
+        private Generator toCloseDataWith;
+
+        public Deserializer(Generator toCloseDataWith) {
+            this.toCloseDataWith = toCloseDataWith;
+        }
+
+        public Commit.Deserializer getCommitDeserializer() {
+            return commitDeserializer;
+        }
+
+        @Override
+        public BrontiGitData deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) throws JsonParseException {
+            HashMap<String, Commit> allCommits = new HashMap<>();
+            commitDeserializer.renewCommitsMap(allCommits);
+
+            JsonObject src = json.getAsJsonObject();
+
+            String current = src.get("current") == null ? null : src.get("current").getAsString();
+
+            JsonArray commitsSrc = src.get("commits").getAsJsonArray();
+            for (JsonElement commitEl : commitsSrc) {
+                context.deserialize(commitEl, Commit.class);
+            }
+
+            Commit pending = context.deserialize(src.get("pending"), Commit.class);
+
+            return new BrontiGitData(toCloseDataWith, allCommits, pending, current);
+        }
+    }
+
+    static class Generator {
 
         private Path root;
+        private Gson gson;
 
-        public Serializer(Path root) {
+        Generator(Path root) {
             this.root = root.toAbsolutePath().normalize();
+
+            BrontiGitData.Deserializer bgdDeser = new BrontiGitData.Deserializer(this);
+
+            gson = new GsonBuilder()
+                    .setPrettyPrinting()
+                    .registerTypeAdapter(Path.class, new PathTypeAdapter())
+                    .registerTypeAdapter(Commit.class, new Commit.Serializer())
+                    .registerTypeAdapter(Commit.class, bgdDeser.getCommitDeserializer())
+                    .registerTypeAdapter(BrontiGitData.class, new BrontiGitData.Serializer())
+                    .registerTypeAdapter(BrontiGitData.class, bgdDeser)
+                    .create();
         }
 
-        private static final String PENDING_FILE_NAME = "pending.json";
-        private static final String COMMITS_FILE_NAME = "commits.json";
+        static final String FILE_NAME = "gitData.json";
 
-        private Gson gson = new GsonBuilder()
-                .setPrettyPrinting()
-                .registerTypeAdapter(Path.class, new PathTypeAdapter())
-                .create();
-
-        private Path getPendingFile() {
-            return root.resolve(PENDING_FILE_NAME);
+        private Path getStorage() {
+            return root.resolve(FILE_NAME);
         }
 
-        private Path getCommitsFile() {
-            return root.resolve(COMMITS_FILE_NAME);
-        }
-
-        public void serialize(BrontiGitData data) throws IOException {
-            try (Writer pendingWriter = new FileWriter(getPendingFile().toString())) {
-                gson.toJson(Commit.Serializable.fromCommit(data.pending), pendingWriter);
-            }
-            try (Writer commitsWriter = new FileWriter(getCommitsFile().toString())) {
-                gson.toJson(
-                        data.commits.values().stream().map(Commit.Serializable::fromCommit).collect(Collectors.toList()),
-                        commitsWriter
-                );
+        void serialize(BrontiGitData data) throws IOException {
+            try (Writer writer = new FileWriter(getStorage().toString())) {
+                gson.toJson(data, writer);
             }
         }
 
-        public BrontiGitData init() {
-            return new BrontiGitData();
+        BrontiGitData init() {
+            return new BrontiGitData(this);
         }
 
-        public BrontiGitData deserialize() throws IOException {
-            try (
-                    Reader pendingReader = new FileReader(getPendingFile().toString());
-                    Reader commitsReader = new FileReader(getCommitsFile().toString())
-            ) {
-                Type commitsType = new TypeToken<List<Commit.Serializable>>(){}.getType();
-                List<Commit.Serializable> serializables = gson.fromJson(commitsReader, commitsType);
-                Map<String, Commit> commits = new HashMap<>();
-                serializables.forEach(c -> commits.put(c.getName(), Commit.Serializable.toCommit(c, commits)));
-                Commit.Serializable serializablePending = gson.fromJson(pendingReader, Commit.Serializable.class);
-                Commit pending = Commit.Serializable.toCommit(serializablePending, commits);
-                return new BrontiGitData(commits, pending);
+        BrontiGitData deserialize() throws IOException {
+            try (Reader reader = new FileReader(getStorage().toString())) {
+                return gson.fromJson(reader, BrontiGitData.class);
             }
         }
+    }
+
+    @Override
+    public void close() throws IOException {
+        toCloseWith.serialize(this);
     }
 
     // for testing purposes only
